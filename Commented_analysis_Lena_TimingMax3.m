@@ -4,11 +4,10 @@ matFiles = dir('Slice*analysis_matlab.mat');
 matFilesNames = {matFiles.name};
 
 % Design a regular expression that matches your naming scheme (https://regexr.com/)
-fin = cellfun(@(x)regexp(x, 'fish(\d+)','tokens'), matFilesNames, 'UniformOutput', false);
+input_files = cellfun(@(x)regexp(x, 'fish(\d+)','tokens'), matFilesNames, 'UniformOutput', false);
 names = [];
-for i = 1:length(fin)
-    fish = str2num(strcat(fin{i}{1}{1})); % Concatenate all the matched groups from the regex
-    names(i) = fish;
+for i = 1:length(input_files)
+    names(i) = str2num(strcat(input_files{i}{1}{1})); % Concatenate all the matched groups from the regex
 end
 fishList = unique(names);
 
@@ -21,7 +20,7 @@ for individualFish = fishList
     indexC = strfind({matFiles.name},strcat('fish', individualFish)); %Make the string match the pattern of the naming scheme you used
     matFilesFish = [matFilesFish find(not(cellfun('isempty', indexC)))];
 end
-matFilesOrdered = matFiles(matFilesFish); %This orders the Matlab files per fish, it helps with the indexing of the ROIs after ANTs
+matFilesOrdered = matFiles(matFilesFish); % This orders the Matlab files per fish, it helps with the indexing of the ROIs after ANTs
 matFilesOrdered = rmfield(matFilesOrdered, 'isdir');
 matFilesOrdered = rmfield(matFilesOrdered, 'folder');
 matFilesOrdered = rmfield(matFilesOrdered, 'bytes');
@@ -80,40 +79,58 @@ matFilesOrdered(1).ROIs = centroids;
 
 clearvars noise calcium;
 
+function croppedData = cropData(data)
+    croppedData = data
+    if size(croppedData, 2) > 1344
+        croppedData(:, 1345 : end) = []; % Delete this when cropping issues no longer a problem
+    end
+end
+
+function traces = loadDenoisedTraces(name)
+    traces = load(name, 'DenoisedTraces').DenoisedTraces;
+    traces = cropData(traces)
+end
+
+function noise = loadNoise(name)
+    noise = load(name, 'Noise').Noise;
+    noise = cropData(data)
+end
+
+function rois = loadROIs(name)
+    rois = load(name,'ROIs').ROIs;
+end
+
+function idxComponents = loadIdxComponents(name, Rs)
+    idx_components = load(name,'idx_components').idx_components + 1;
+    idx_components = Rs(:, idx_components);
+end
+
+
 % Now that the initial variables are created you iterate over all the files
 for i = 2 : length(matFilesOrdered)
     progressbar(i / length(matFilesOrdered), []);
     name = matFilesOrdered(i).name;
-    C = load(name, 'DenoisedTraces');
-    C = C.DenoisedTraces;
-    if size(C, 2) > 1344
-        C(:, 1345 : end) = []; % Delete this when cropping issues no longer a problem
-    end
-    N = load(name, 'Noise');
-    N = N.Noise;
-    if size(N, 2) > 1344
-        N(:, 1345 : end) = []; % Delete this when cropping issues no longer a problem
-    end
-    Rs = load(name,'ROIs');
-    Rs = Rs.ROIs;
-    F = load(name,'idx_components');
-    F = F.idx_components + 1;
-    Rs = Rs(:, F);
+
+    DenoisedTraces = loadDenoisedTraces(name);
+    Noise = loadNoise(name);
+    ROIs = loadROIs(name);
+    IdxComponents = loadIdxComponents(name, ROIs)
+
     corName = strrep(name, 'analysis_matlab','correlation');
     corIm = load(corName);
     corIm = corIm.Correlation_image;
     dims = size(corIm);
-    ROI = reshape(full(Rs), dims(1), dims(2), size(Rs,2));
+    ROI = reshape(full(ROIs), dims(1), dims(2), size(ROIs,2));
    
-    centroids = zeros(size(Rs, 2), 2);
+    centroids = zeros(size(ROIs, 2), 2);
     for roiNb = 1 : size(ROI, 3)
         progressbar([], roiNb / size(ROI, 3));
         temp = regionprops(uint16(squeeze(ROI(:, :, roiNb))) == max(max(uint16(squeeze(ROI(:, :, roiNb))))), 'Centroid');
         temp = temp.Centroid;
         centroids(roiNb, 1 : 2) = temp;
     end
-    GC = C(F, :);
-    GN = N(F, :);
+    GC = DenoisedTraces(F, :);
+    GN = Noise(F, :);
     goodComponents = horzcat(goodComponents, F);
     goodCalcium = vertcat(goodCalcium, GC);
     goodNoise = vertcat(goodNoise, GN);
@@ -125,40 +142,39 @@ clearvars temp GC C S F N name i GS GN Rs goodComponents corIm centroids corName
  
 % We Z-score the data, you can choose to include the noise or not
 % Your data should be in a matrix of NbNeurons x TimePoints
-ZS = zscore(goodCalcium + goodNoise, 1, 2);
+ZScore = zscore(goodCalcium + goodNoise, 1, 2);
 
 clearvars goodCalcium goodNoise;
 
 %% FOR TIMING B: Flip around B scripts to remove midpoint spike/artefact
-tempZS(:, 1 : 672) = ZS(:, 673 : end);
-tempZS(:, 673 : 1344) = ZS(:, 1 : 672);
-ZS = tempZS;
+tempZScore(:, 1 : 672) = ZS(:, 673 : end);
+tempZScore(:, 673 : 1344) = ZS(:, 1 : 672);
+ZScore = tempZScore;
 
 % To confirm flipped timeseries correctly
 figure;
-plot(mean(ZS, 1));
+plot(mean(ZScore, 1));
 
 clearvars tempZS;
 
-%% OPTIONAL: Detrend traces to flatten baselines to 0
-figure;
-plot(mean(ZS, 1));
-yline(0);
-xlabel('Number of frames');
-ylabel('Z-scored change in fluorescence');
-title("TimingA, Before detrending");
-%saveas(gcf, "Fig_TimingA, Before detrending", 'svg');
+% Plot and save data
+function plotData(data, xlabel, ylabel, title, fileName, types)
+    figure;
+    plot(mean(ZScore, 1));
+    yline(0);
+    xlabel(xlabel);
+    ylabel(ylabel);
+    title(title);
+    for type = types:
+        %saveas(gcf, fileName , type);
+end
 
+
+%% OPTIONAL: Detrend traces to flatten baselines to 0
+plotData(ZS, 'Number of frames', 'Z-scored change in fluorescence', "TimingA, Before detrending", "Fig_TimingA, Before detrending", ["svg"])
 detrendedZS = detrend(ZS','linear');
 ZS = detrendedZS';
-figure;
-plot(mean(ZS,1));
-yline(0);
-xlabel('Number of frames');
-ylabel('Z-scored change in fluorescence');
-title("TimingA, After detrending");
-%saveas(gcf, "Fig_TimingA, After detrending", 'svg');
-%saveas(gcf, "Fig_TimingA, After detrending", 'fig');
+plotData(ZS, 'Number of frames', 'Z-scored change in fluorescence', "TimingA, After detrending", "Fig_TimingA, After detrending", ['svg', 'fig'])
 
 clearvars detrendedZS;
 
@@ -228,16 +244,18 @@ burstStimulusSecs = [15, 100, 146, 190, 235, 275, 316, 397, 440, 482, 522, 566, 
 loomStimulusSecs = [57, 100, 146, 190, 235, 275, 316, 351, 440, 482, 522, 566, 607, 652]; % checkerboard loom alone
 
 % Overlaying the timing of Timing B MSI stimuli over the traces
-stimulusTrain = zeros(2, size(ZS, 2));
-for i = burstStimulusSecs % white noise burst alone
-    idx = i * frameRate;
-    stimulusTrain(1, idx + 9 : idx - 1 + length(loomSpike) + 9) = loomSpike;
+function overlay = overlayTiming(data, overlay, column)
+    for i = overlay % white noise burst alone
+        idx = i * frameRate;
+        stimulusTrain(column, idx + 9 : idx - 1 + length(loomSpike) + 9) = loomSpike;
+    end
+    overlay = stimulusTrain
 end
 
-for i = loomStimulusSecs % checkerboard loom alone
-    idx = i * frameRate;
-    stimulusTrain(2, idx + 9 : idx - 1 + length(loomSpike) + 9) = loomSpike;
-end
+
+stimulusTrain = zeros(2, size(ZS, 2));
+stimulusTrain = overlayTiming(stimulusTrain, burstStimulusSecs, 1)
+stimulusTrain = overlayTiming(stimulusTrain, loomStimulusSecs, 2)
 
 % Your stimulus should look like a multicolored set of GCaMP waves
 figure;
@@ -440,36 +458,48 @@ clearvars msiBurstAloneR2 msiLoomAloneR2 msiNeg400R2 msiNeg200R2 msiNeg100R2 msi
 
 %% Define which ROIs are supralinear and sublinear on a scale of 1-10
 % Returns 1 if ROI is greater than sum of unisensory stimuli + 1SD
+% This is terrible. What do all these if statements actually check?
 isSupraLinear = zeros(length(thresholdZS), 10);
+someValue1 = maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2
+someValue2 = maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2
+
+function isThing = isThisAThingo(lessThanValue)
+    isThing = false
+    if (((someValue2) < lessThanValue) && (someValue1) < lessThanValue)
+        isThing = true
+    end
+end
+
+
 for i = 1 : length(thresholdZS)
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxNeg200R1) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxNeg200R1)
+    if (isThisAThing(maxValues(i).maxNeg200R1))
         isSupraLinear(i, 1) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxNeg200R2) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxNeg200R2)
+    if (isThisAThingo(maxValues(i).maxNeg200R2) 
         isSupraLinear(i, 2) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxNeg100R1) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxNeg100R1)
+    if (isThisAThingo(maxValues(i).maxNeg100R1)
         isSupraLinear(i, 3) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxNeg100R2) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxNeg100R2)
+    if (isThisAThingo(maxValues(i).maxNeg100R2)
         isSupraLinear(i, 4) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxZeroR1) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxZeroR1)
+    if (isThisAThingo(maxValues(i).maxZeroR1) 
         isSupraLinear(i, 5) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxZeroR2) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxZeroR2)
+    if (isThisAThingo(maxValues(i).maxZeroR2) 
         isSupraLinear(i, 6) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxPos100R1) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxPos100R1)
+    if (isThisAThingo(maxValues(i).maxPos100R1)
         isSupraLinear(i, 7) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxPos100R2) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxPos100R2)
+    if (isThisAThingo(maxValues(i).maxPos100R2)
         isSupraLinear(i, 8) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxPos200R1) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxPos200R1)
+    if (isThisAThingo(maxValues(i).maxPos200R1) 
         isSupraLinear(i, 9) = 1;
     end
-    if (((maxValues(i).avgMaxLoomR1R2 + maxValues(i).stdMaxLoomR1R2) < maxValues(i).maxPos200R2) && (maxValues(i).avgMaxBurstR1R2 + maxValues(i).stdMaxBurstR1R2) < maxValues(i).maxPos200R2)
+    if (isThisAThingo(maxValues(i).maxPos200R2) 
         isSupraLinear(i, 10) = 1;
     end
 end
